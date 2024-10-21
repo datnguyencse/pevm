@@ -1,7 +1,6 @@
 use crate::common::storage::{
     from_address, from_indices, from_short_string, from_tick, StorageBuilder,
 };
-use ahash::AHashMap;
 use pevm::EvmAccount;
 use revm::primitives::{
     fixed_bytes,
@@ -63,14 +62,14 @@ impl WETH9 {
 #[derive(Debug, Default)]
 pub struct UniswapV3Factory {
     owner: Address,
-    pools: AHashMap<(Address, Address, U256), Address>,
+    pools: foldhash::HashMap<(Address, Address, U256), Address>,
 }
 
 impl UniswapV3Factory {
     pub fn new(owner: Address) -> Self {
         Self {
             owner,
-            pools: AHashMap::new(),
+            pools: foldhash::HashMap::default(),
         }
     }
 
@@ -143,9 +142,9 @@ pub struct UniswapV3Pool {
     token_0: Address,
     token_1: Address,
     factory: Address,
-    positions: AHashMap<U256, [U256; 4]>,
-    ticks: AHashMap<U256, [U256; 4]>,
-    tick_bitmap: AHashMap<U256, U256>,
+    positions: foldhash::HashMap<U256, [U256; 4]>,
+    ticks: foldhash::HashMap<U256, [U256; 4]>,
+    tick_bitmap: foldhash::HashMap<U256, U256>,
 }
 
 impl UniswapV3Pool {
@@ -154,9 +153,9 @@ impl UniswapV3Pool {
             token_0,
             token_1,
             factory,
-            positions: AHashMap::new(),
-            ticks: AHashMap::new(),
-            tick_bitmap: AHashMap::new(),
+            positions: foldhash::HashMap::default(),
+            ticks: foldhash::HashMap::default(),
+            tick_bitmap: foldhash::HashMap::default(),
         }
     }
 

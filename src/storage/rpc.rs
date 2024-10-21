@@ -3,7 +3,6 @@
 
 use std::{fmt::Debug, future::IntoFuture, sync::Mutex, time::Duration};
 
-use ahash::AHashMap;
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{
     network::{BlockResponse, HeaderResponse},
@@ -150,7 +149,7 @@ impl<N: Network> Storage for RpcStorage<N> {
                 nonce,
                 code_hash,
                 code: None,
-                storage: AHashMap::default(),
+                storage: foldhash::HashMap::default(),
             },
         );
         Ok(Some(AccountBasic { balance, nonce }))

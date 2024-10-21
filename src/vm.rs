@@ -1,4 +1,5 @@
-use ahash::HashMapExt;
+use std::hash::BuildHasher;
+
 use alloy_primitives::TxKind;
 use alloy_rpc_types::Receipt;
 use revm::{
@@ -9,8 +10,6 @@ use revm::{
     Context, Database, Evm, EvmContext,
 };
 use smallvec::{smallvec, SmallVec};
-
-use std::collections::HashMap;
 
 use crate::{
     chain::{PevmChain, RewardPolicy},
@@ -28,7 +27,8 @@ pub type ExecutionError = EVMError<ReadError>;
 /// Represents the state transitions of the EVM accounts after execution.
 /// If the value is [None], it indicates that the account is marked for removal.
 /// If the value is [Some(new_state)], it indicates that the account has become [new_state].
-type EvmStateTransitions = HashMap<Address, Option<EvmAccount>, BuildSuffixHasher>;
+type EvmStateTransitions =
+    std::collections::HashMap<Address, Option<EvmAccount>, BuildSuffixHasher>;
 
 /// Execution result of a transaction
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +134,11 @@ struct VmDb<'a, S: Storage, C: PevmChain> {
     is_lazy: bool,
     read_set: ReadSet,
     // TODO: Clearer type for [AccountBasic] plus code hash
-    read_accounts: HashMap<MemoryLocationHash, (AccountBasic, Option<B256>), BuildIdentityHasher>,
+    read_accounts: std::collections::HashMap<
+        MemoryLocationHash,
+        (AccountBasic, Option<B256>),
+        BuildIdentityHasher,
+    >,
 }
 
 impl<'a, S: Storage, C: PevmChain> VmDb<'a, S, C> {
@@ -153,10 +157,11 @@ impl<'a, S: Storage, C: PevmChain> VmDb<'a, S, C> {
             to_hash,
             to_code_hash: None,
             is_lazy: false,
-            // Unless it is a raw transfer that is lazy updated, we'll
-            // read at least from the sender and recipient accounts.
-            read_set: ReadSet::with_capacity(2),
-            read_accounts: HashMap::with_capacity_and_hasher(2, BuildIdentityHasher::default()),
+            read_set: ReadSet::with_capacity_and_hasher(2, BuildIdentityHasher::default()),
+            read_accounts: std::collections::HashMap::with_capacity_and_hasher(
+                2,
+                BuildIdentityHasher::default(),
+            ),
         };
         // We only lazy update raw transfers that already have the sender
         // or recipient in [MvMemory] since sequentially evaluating memory
@@ -496,7 +501,7 @@ impl<'a, S: Storage, C: PevmChain> Database for VmDb<'a, S, C> {
 }
 
 pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
-    hasher: &'a ahash::RandomState,
+    hasher: &'a foldhash::fast::RandomState,
     storage: &'a S,
     mv_memory: &'a MvMemory,
     chain: &'a C,
@@ -509,7 +514,7 @@ pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
 
 impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
     pub(crate) fn new(
-        hasher: &'a ahash::RandomState,
+        hasher: &'a foldhash::fast::RandomState,
         storage: &'a S,
         mv_memory: &'a MvMemory,
         chain: &'a C,

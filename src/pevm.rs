@@ -1,11 +1,11 @@
 use std::{
     fmt::Debug,
+    hash::BuildHasher,
     num::NonZeroUsize,
     sync::{mpsc, Mutex, OnceLock},
     thread,
 };
 
-use ahash::AHashMap;
 use alloy_primitives::U256;
 use alloy_rpc_types::{Block, BlockTransactions};
 use revm::{
@@ -83,7 +83,7 @@ impl<T> AsyncDropper<T> {
 #[derive(Debug, Default)]
 /// The main pevm struct that executes blocks.
 pub struct Pevm {
-    hasher: ahash::RandomState,
+    hasher: foldhash::fast::RandomState,
     execution_results: Vec<Mutex<Option<PevmTxExecutionResult>>>,
     abort_reason: OnceLock<AbortReason>,
     dropper: AsyncDropper<(MvMemory, Scheduler, Vec<TxEnv>)>,
@@ -323,7 +323,7 @@ impl Pevm {
                             nonce,
                             code_hash,
                             code: code.clone(),
-                            storage: AHashMap::default(),
+                            storage: foldhash::HashMap::default(),
                         });
                     }
                 }

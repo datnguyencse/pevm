@@ -1,6 +1,5 @@
-use std::{collections::HashMap, fmt::Display, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
-use ahash::AHashMap;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use bitvec::vec::BitVec;
 use revm::{
@@ -33,7 +32,7 @@ pub struct EvmAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<EvmCode>,
     /// The account's storage.
-    pub storage: AHashMap<U256, U256>,
+    pub storage: foldhash::HashMap<U256, U256>,
 }
 
 impl From<Account> for EvmAccount {
@@ -159,13 +158,13 @@ impl From<Bytecode> for EvmCode {
 }
 
 /// Mapping from address to [EvmAccount]
-pub type ChainState = HashMap<Address, EvmAccount, BuildSuffixHasher>;
+pub type ChainState = std::collections::HashMap<Address, EvmAccount, BuildSuffixHasher>;
 
 /// Mapping from code hashes to [EvmCode]s
-pub type Bytecodes = HashMap<B256, EvmCode, BuildSuffixHasher>;
+pub type Bytecodes = std::collections::HashMap<B256, EvmCode, BuildSuffixHasher>;
 
 /// Mapping from block numbers to block hashes
-pub type BlockHashes = HashMap<u64, B256, BuildIdentityHasher>;
+pub type BlockHashes = std::collections::HashMap<u64, B256, BuildIdentityHasher>;
 
 /// An interface to provide chain state to Pevm for transaction execution.
 /// Staying close to the underlying REVM's Database trait while not leaking

@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fs::{self, File},
     io::BufReader,
 };
@@ -69,10 +68,11 @@ pub fn for_each_block_from_disk(mut handler: impl FnMut(Block, InMemoryStorage))
         .unwrap();
 
         // Parse state
-        let accounts: HashMap<Address, EvmAccount> = serde_json::from_reader(BufReader::new(
-            File::open(format!("data/blocks/{block_number}/pre_state.json")).unwrap(),
-        ))
-        .unwrap();
+        let accounts: foldhash::HashMap<Address, EvmAccount> =
+            serde_json::from_reader(BufReader::new(
+                File::open(format!("data/blocks/{block_number}/pre_state.json")).unwrap(),
+            ))
+            .unwrap();
 
         // Parse block hashes
         let block_hashes: BlockHashes =

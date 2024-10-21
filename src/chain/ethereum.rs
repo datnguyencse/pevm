@@ -1,9 +1,6 @@
 //! Ethereum
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Debug,
-};
+use std::{collections::BTreeMap, fmt::Debug, hash::BuildHasher};
 
 use alloy_chains::NamedChain;
 use alloy_consensus::{ReceiptEnvelope, TxType};
@@ -151,9 +148,9 @@ impl PevmChain for PevmEthereum {
         })
     }
 
-    fn build_mv_memory(
+    fn build_mv_memory<H: BuildHasher>(
         &self,
-        hasher: &ahash::RandomState,
+        hasher: &H,
         block_env: &BlockEnv,
         txs: &[TxEnv],
     ) -> MvMemory {
@@ -161,7 +158,8 @@ impl PevmChain for PevmEthereum {
         let beneficiary_location_hash = hasher.hash_one(MemoryLocation::Basic(block_env.coinbase));
 
         // TODO: Estimate more locations based on sender, to, etc.
-        let mut estimated_locations = HashMap::with_hasher(BuildIdentityHasher::default());
+        let mut estimated_locations =
+            std::collections::HashMap::with_hasher(BuildIdentityHasher::default());
         estimated_locations.insert(
             beneficiary_location_hash,
             (0..block_size).collect::<Vec<TxIdx>>(),
@@ -178,7 +176,7 @@ impl PevmChain for PevmEthereum {
         Handler::mainnet_with_spec(spec_id, with_reward_beneficiary)
     }
 
-    fn get_reward_policy(&self, _hasher: &ahash::RandomState) -> RewardPolicy {
+    fn get_reward_policy(&self, _hasher: &foldhash::fast::RandomState) -> RewardPolicy {
         RewardPolicy::Ethereum
     }
 

@@ -1,5 +1,6 @@
 //! Optimism
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::hash::BuildHasher;
 
 use alloy_chains::NamedChain;
 use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
@@ -156,9 +157,9 @@ impl PevmChain for PevmOptimism {
         }
     }
 
-    fn build_mv_memory(
+    fn build_mv_memory<H: BuildHasher>(
         &self,
-        hasher: &ahash::RandomState,
+        hasher: &H,
         block_env: &BlockEnv,
         txs: &[TxEnv],
     ) -> MvMemory {
@@ -167,7 +168,8 @@ impl PevmChain for PevmOptimism {
         let base_fee_recipient_location_hash = hasher.hash_one(revm::BASE_FEE_RECIPIENT);
 
         // TODO: Estimate more locations based on sender, to, etc.
-        let mut estimated_locations = HashMap::with_hasher(BuildIdentityHasher::default());
+        let mut estimated_locations =
+            std::collections::HashMap::with_hasher(BuildIdentityHasher::default());
         for (index, tx) in txs.iter().enumerate() {
             if tx.optimism.source_hash.is_none() {
                 estimated_locations
@@ -207,7 +209,7 @@ impl PevmChain for PevmOptimism {
         Handler::optimism_with_spec(spec_id, with_reward_beneficiary)
     }
 
-    fn get_reward_policy(&self, hasher: &ahash::RandomState) -> RewardPolicy {
+    fn get_reward_policy(&self, hasher: &foldhash::fast::RandomState) -> RewardPolicy {
         RewardPolicy::Optimism {
             l1_fee_recipient_location_hash: hasher
                 .hash_one(MemoryLocation::Basic(revm::optimism::L1_FEE_RECIPIENT)),
