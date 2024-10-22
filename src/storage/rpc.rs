@@ -3,7 +3,6 @@
 
 use std::{fmt::Debug, future::IntoFuture, sync::Mutex, time::Duration};
 
-use ahash::AHashMap;
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{
     network::{BlockResponse, HeaderResponse},
@@ -17,6 +16,7 @@ use revm::{
     precompile::{PrecompileSpecId, Precompiles},
     primitives::{Bytecode, SpecId},
 };
+use rustc_hash::FxHashMap;
 use tokio::runtime::Runtime;
 
 use crate::{AccountBasic, EvmAccount, Storage};
@@ -150,7 +150,7 @@ impl<N: Network> Storage for RpcStorage<N> {
                 nonce,
                 code_hash,
                 code: None,
-                storage: AHashMap::default(),
+                storage: FxHashMap::default(),
             },
         );
         Ok(Some(AccountBasic { balance, nonce }))

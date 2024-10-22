@@ -1,4 +1,3 @@
-use ahash::HashMapExt;
 use alloy_primitives::TxKind;
 use alloy_rpc_types::Receipt;
 use revm::{
@@ -11,6 +10,7 @@ use revm::{
 use smallvec::{smallvec, SmallVec};
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use crate::{
     chain::{PevmChain, RewardPolicy},
@@ -155,7 +155,7 @@ impl<'a, S: Storage, C: PevmChain> VmDb<'a, S, C> {
             is_lazy: false,
             // Unless it is a raw transfer that is lazy updated, we'll
             // read at least from the sender and recipient accounts.
-            read_set: ReadSet::with_capacity(2),
+            read_set: ReadSet::with_capacity_and_hasher(2, BuildIdentityHasher::default()),
             read_accounts: HashMap::with_capacity_and_hasher(2, BuildIdentityHasher::default()),
         };
         // We only lazy update raw transfers that already have the sender
@@ -496,7 +496,7 @@ impl<'a, S: Storage, C: PevmChain> Database for VmDb<'a, S, C> {
 }
 
 pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
-    hasher: &'a ahash::RandomState,
+    hasher: &'a rustc_hash::FxRandomState,
     storage: &'a S,
     mv_memory: &'a MvMemory,
     chain: &'a C,
@@ -509,7 +509,7 @@ pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
 
 impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
     pub(crate) fn new(
-        hasher: &'a ahash::RandomState,
+        hasher: &'a rustc_hash::FxRandomState,
         storage: &'a S,
         mv_memory: &'a MvMemory,
         chain: &'a C,

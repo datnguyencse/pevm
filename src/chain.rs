@@ -65,7 +65,7 @@ pub trait PevmChain: Debug {
     /// Build [MvMemory]
     fn build_mv_memory(
         &self,
-        _hasher: &ahash::RandomState,
+        _hasher: &rustc_hash::FxRandomState,
         _block_env: &BlockEnv,
         txs: &[TxEnv],
     ) -> MvMemory {
@@ -80,7 +80,7 @@ pub trait PevmChain: Debug {
     ) -> Handler<'a, revm::Context<EXT, DB>, EXT, DB>;
 
     /// Get [RewardPolicy]
-    fn get_reward_policy(&self, hasher: &ahash::RandomState) -> RewardPolicy;
+    fn get_reward_policy(&self, hasher: &rustc_hash::FxRandomState) -> RewardPolicy;
 
     /// Calculate receipt root
     fn calculate_receipt_root(

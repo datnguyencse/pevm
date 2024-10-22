@@ -1,5 +1,6 @@
 //! Optimism
 use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasher;
 
 use alloy_chains::NamedChain;
 use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
@@ -158,7 +159,7 @@ impl PevmChain for PevmOptimism {
 
     fn build_mv_memory(
         &self,
-        hasher: &ahash::RandomState,
+        hasher: &rustc_hash::FxRandomState,
         block_env: &BlockEnv,
         txs: &[TxEnv],
     ) -> MvMemory {
@@ -207,7 +208,7 @@ impl PevmChain for PevmOptimism {
         Handler::optimism_with_spec(spec_id, with_reward_beneficiary)
     }
 
-    fn get_reward_policy(&self, hasher: &ahash::RandomState) -> RewardPolicy {
+    fn get_reward_policy(&self, hasher: &rustc_hash::FxRandomState) -> RewardPolicy {
         RewardPolicy::Optimism {
             l1_fee_recipient_location_hash: hasher
                 .hash_one(MemoryLocation::Basic(revm::optimism::L1_FEE_RECIPIENT)),

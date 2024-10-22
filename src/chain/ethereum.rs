@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Debug,
+    hash::BuildHasher,
 };
 
 use alloy_chains::NamedChain;
@@ -153,7 +154,7 @@ impl PevmChain for PevmEthereum {
 
     fn build_mv_memory(
         &self,
-        hasher: &ahash::RandomState,
+        hasher: &rustc_hash::FxRandomState,
         block_env: &BlockEnv,
         txs: &[TxEnv],
     ) -> MvMemory {
@@ -178,7 +179,7 @@ impl PevmChain for PevmEthereum {
         Handler::mainnet_with_spec(spec_id, with_reward_beneficiary)
     }
 
-    fn get_reward_policy(&self, _hasher: &ahash::RandomState) -> RewardPolicy {
+    fn get_reward_policy(&self, _hasher: &rustc_hash::FxRandomState) -> RewardPolicy {
         RewardPolicy::Ethereum
     }
 

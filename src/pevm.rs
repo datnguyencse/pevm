@@ -1,11 +1,11 @@
 use std::{
     fmt::Debug,
+    hash::BuildHasher,
     num::NonZeroUsize,
     sync::{mpsc, Mutex, OnceLock},
     thread,
 };
 
-use ahash::AHashMap;
 use alloy_primitives::U256;
 use alloy_rpc_types::{Block, BlockTransactions};
 use revm::{
@@ -13,6 +13,7 @@ use revm::{
     primitives::{BlockEnv, SpecId, TxEnv},
     DatabaseCommit,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     chain::PevmChain,
@@ -80,10 +81,10 @@ impl<T> AsyncDropper<T> {
 }
 
 // TODO: Port more recyclable resources into here.
-#[derive(Debug, Default)]
+#[derive(Default)]
 /// The main pevm struct that executes blocks.
 pub struct Pevm {
-    hasher: ahash::RandomState,
+    hasher: rustc_hash::FxRandomState,
     execution_results: Vec<Mutex<Option<PevmTxExecutionResult>>>,
     abort_reason: OnceLock<AbortReason>,
     dropper: AsyncDropper<(MvMemory, Scheduler, Vec<TxEnv>)>,
@@ -323,7 +324,7 @@ impl Pevm {
                             nonce,
                             code_hash,
                             code: code.clone(),
-                            storage: AHashMap::default(),
+                            storage: FxHashMap::default(),
                         });
                     }
                 }

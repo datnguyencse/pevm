@@ -1,13 +1,13 @@
 use crate::common::storage::{
     from_address, from_indices, from_short_string, from_tick, StorageBuilder,
 };
-use ahash::AHashMap;
 use pevm::EvmAccount;
 use revm::primitives::{
     fixed_bytes,
     hex::{FromHex, ToHexExt},
     keccak256, uint, Address, Bytecode, Bytes, FixedBytes, B256, U256,
 };
+use rustc_hash::FxHashMap;
 
 const POOL_FEE: u32 = 3000;
 const TICK_SPACING: i32 = 60;
@@ -63,14 +63,14 @@ impl WETH9 {
 #[derive(Debug, Default)]
 pub struct UniswapV3Factory {
     owner: Address,
-    pools: AHashMap<(Address, Address, U256), Address>,
+    pools: FxHashMap<(Address, Address, U256), Address>,
 }
 
 impl UniswapV3Factory {
     pub fn new(owner: Address) -> Self {
         Self {
             owner,
-            pools: AHashMap::new(),
+            pools: FxHashMap::default(),
         }
     }
 
@@ -143,9 +143,9 @@ pub struct UniswapV3Pool {
     token_0: Address,
     token_1: Address,
     factory: Address,
-    positions: AHashMap<U256, [U256; 4]>,
-    ticks: AHashMap<U256, [U256; 4]>,
-    tick_bitmap: AHashMap<U256, U256>,
+    positions: FxHashMap<U256, [U256; 4]>,
+    ticks: FxHashMap<U256, [U256; 4]>,
+    tick_bitmap: FxHashMap<U256, U256>,
 }
 
 impl UniswapV3Pool {
@@ -154,9 +154,9 @@ impl UniswapV3Pool {
             token_0,
             token_1,
             factory,
-            positions: AHashMap::new(),
-            ticks: AHashMap::new(),
-            tick_bitmap: AHashMap::new(),
+            positions: FxHashMap::default(),
+            ticks: FxHashMap::default(),
+            tick_bitmap: FxHashMap::default(),
         }
     }
 
