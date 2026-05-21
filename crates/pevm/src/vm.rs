@@ -79,8 +79,7 @@ impl PevmTxExecutionResult {
     ) {
         self.receipt.status = result.is_success().into();
         self.receipt.cumulative_gas_used = result.tx_gas_used();
-        self.receipt.logs.clear();
-        self.receipt.logs.extend(result.into_logs());
+        self.receipt.logs = result.into_logs();
         self.state.clear();
         self.state.extend(
             state
