@@ -210,7 +210,8 @@ impl Pevm {
         if additional > 0 {
             self.execution_results.reserve(additional);
             for _ in 0..additional {
-                self.execution_results.push(PendingExecutionResult::default());
+                self.execution_results
+                    .push(PendingExecutionResult::default());
             }
         }
 
