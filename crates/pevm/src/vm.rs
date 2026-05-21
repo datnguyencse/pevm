@@ -68,6 +68,35 @@ impl PevmTxExecutionResult {
                 .collect(),
         }
     }
+
+    // Reuse existing heap allocations (logs Vec, state HashMap) from a prior
+    // incarnation and assign new values from a new Revm execution result.
+    fn assign_from_revm<C: PevmChain>(
+        &mut self,
+        chain: &C,
+        spec_id: C::EvmSpecId,
+        ResultAndState { result, state }: ResultAndState<C::EvmHaltReason>,
+    ) {
+        self.receipt.status = result.is_success().into();
+        self.receipt.cumulative_gas_used = result.tx_gas_used();
+        self.receipt.logs.clear();
+        self.receipt.logs.extend(result.into_logs());
+        self.state.clear();
+        self.state.extend(
+            state
+                .into_iter()
+                .filter(|(_, account)| account.is_touched())
+                .map(|(address, account)| {
+                    if account.is_selfdestructed()
+                        || account.is_empty() && chain.is_eip_161_enabled(spec_id)
+                    {
+                        (address, None)
+                    } else {
+                        (address, Some(EvmAccount::from(account)))
+                    }
+                }),
+        );
+    }
 }
 
 pub(crate) enum VmExecutionError {
@@ -117,11 +146,6 @@ impl From<ReadError> for VmExecutionError {
             _ => Self::ExecutionError(EVMError::Database(err)),
         }
     }
-}
-
-pub(crate) struct VmExecutionResult {
-    pub(crate) execution_result: PevmTxExecutionResult,
-    pub(crate) flags: FinishExecFlags,
 }
 
 // A database interface that intercepts reads while executing a specific
@@ -548,7 +572,8 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
     pub(crate) fn execute(
         &mut self,
         tx_version: &TxVersion,
-    ) -> Result<VmExecutionResult, VmExecutionError> {
+        out: &mut Option<PevmTxExecutionResult>,
+    ) -> Result<FinishExecFlags, VmExecutionError> {
         // SAFETY: A correct scheduler would guarantee this index to be inbound.
         let full_tx = unsafe { self.txs.get_unchecked(tx_version.tx_idx) };
         let tx = self.chain.tx_env(full_tx);
@@ -734,14 +759,19 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                     flags |= FinishExecFlags::WroteNewLocation;
                 }
 
-                Ok(VmExecutionResult {
-                    execution_result: PevmTxExecutionResult::from_revm(
-                        self.chain,
-                        self.spec_id,
-                        result_and_state,
-                    ),
-                    flags,
-                })
+                match out {
+                    Some(result) => {
+                        result.assign_from_revm(self.chain, self.spec_id, result_and_state)
+                    }
+                    None => {
+                        *out = Some(PevmTxExecutionResult::from_revm(
+                            self.chain,
+                            self.spec_id,
+                            result_and_state,
+                        ))
+                    }
+                }
+                Ok(flags)
             }
             Err(EVMError::Database(read_error)) => Err(VmExecutionError::from(read_error)),
             Err(err) => {

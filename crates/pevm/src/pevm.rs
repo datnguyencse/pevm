@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    fmt::Debug,
+    fmt::{self, Debug},
     num::NonZeroUsize,
     sync::{OnceLock, mpsc},
     thread,
@@ -24,7 +24,7 @@ use crate::{
     mv_memory::MvMemory,
     scheduler::Scheduler,
     storage::StorageWrapper,
-    vm::{ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError, VmExecutionResult},
+    vm::{ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError},
 };
 
 /// Errors when executing a block with pevm.
@@ -101,20 +101,34 @@ impl<T> AsyncDropper<T> {
     }
 }
 
+// One slot in the per-block result array. The scheduler guarantees that only the thread
+// executing a given tx index accesses its slot, so interior mutability is safe.
+struct PendingExecutionResult(UnsafeCell<Option<PevmTxExecutionResult>>);
+
+// SAFETY: The scheduler ensures at most one thread accesses a given slot at a time,
+// and the collection phase runs only after all worker threads have joined.
+unsafe impl Sync for PendingExecutionResult {}
+
+impl Default for PendingExecutionResult {
+    fn default() -> Self {
+        Self(UnsafeCell::new(None))
+    }
+}
+
+impl fmt::Debug for PendingExecutionResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PendingExecutionResult { .. }")
+    }
+}
+
 // TODO: Port more recyclable resources into here.
 #[derive(Debug, Default)]
 /// The main pevm struct that executes blocks.
 pub struct Pevm {
-    // The scheduler guarantees each tx index is written by exactly one thread at a time,
-    // so distinct-index concurrent access is race-free despite UnsafeCell not being Sync.
-    execution_results: Vec<UnsafeCell<Option<PevmTxExecutionResult>>>,
+    execution_results: Vec<PendingExecutionResult>,
     abort_reason: OnceLock<AbortReason>,
     dropper: AsyncDropper<(MvMemory, Scheduler)>,
 }
-
-// SAFETY: The scheduler guarantees that each transaction index is written by exactly one thread at a time,
-// and results are only read after all threads have joined. Other fields are either Sync or safe to share.
-unsafe impl Sync for Pevm {}
 
 impl Pevm {
     /// Execute an Alloy block, which is becoming the "standard" format in Rust.
@@ -196,7 +210,7 @@ impl Pevm {
         if additional > 0 {
             self.execution_results.reserve(additional);
             for _ in 0..additional {
-                self.execution_results.push(UnsafeCell::new(None));
+                self.execution_results.push(PendingExecutionResult::default());
             }
         }
 
@@ -249,12 +263,10 @@ impl Pevm {
 
         let mut fully_evaluated_results = Vec::with_capacity(block_size);
         let mut cumulative_gas_used: u64 = 0;
-        for i in 0..block_size {
-            // SAFETY: All worker threads have joined, and the index is guaranteed to be in bounds.
-            let taken = unsafe { (*self.execution_results.get_unchecked(i).get()).take() };
-            let Some(mut result) = taken else {
-                return Err(PevmError::UnreachableError);
-            };
+        for slot in &mut self.execution_results[..block_size] {
+            // SAFETY: the scheduler guarantees every tx in 0..block_size completes before
+            // we reach this point, so every slot is guaranteed to hold Some(_).
+            let mut result = unsafe { (*slot.0.get()).take().unwrap_unchecked() };
 
             cumulative_gas_used =
                 cumulative_gas_used.saturating_add(result.receipt.cumulative_gas_used);
@@ -390,8 +402,17 @@ impl Pevm {
         scheduler: &Scheduler,
         tx_version: TxVersion,
     ) -> Option<Task> {
+        // SAFETY: scheduler guarantees exclusive access to this index while executing.
+        let out = unsafe {
+            &mut *self
+                .execution_results
+                .get_unchecked(tx_version.tx_idx)
+                .0
+                .get()
+        };
         loop {
-            return match vm.execute(&tx_version) {
+            return match vm.execute(&tx_version, out) {
+                Ok(flags) => scheduler.finish_execution(tx_version, flags),
                 Err(VmExecutionError::Retry) => {
                     if self.abort_reason.get().is_none() {
                         continue;
@@ -419,20 +440,6 @@ impl Pevm {
                     self.abort_reason
                         .get_or_init(|| AbortReason::ExecutionError(err));
                     None
-                }
-                Ok(VmExecutionResult {
-                    execution_result,
-                    flags,
-                }) => {
-                    // SAFETY: scheduler ensures tx_idx < block_size and no two threads write
-                    // to the same index concurrently.
-                    unsafe {
-                        *self
-                            .execution_results
-                            .get_unchecked(tx_version.tx_idx)
-                            .get() = Some(execution_result);
-                    }
-                    scheduler.finish_execution(tx_version, flags)
                 }
             };
         }
