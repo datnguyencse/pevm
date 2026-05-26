@@ -110,9 +110,10 @@ impl Scheduler {
             let execution_idx = self.execution_idx.load(Ordering::Relaxed);
             let validation_idx = self.validation_idx.load(Ordering::Relaxed);
             if execution_idx >= self.block_size && validation_idx >= self.block_size {
-                if self.num_validated.load(Ordering::Relaxed)
-                    >= self.block_size - self.min_validation_idx.load(Ordering::Relaxed)
-                {
+                // Require all transactions to be validated before any thread exits.
+                // Tail transactions that fail validation need re-execution, and
+                // must not be left with a shrinking thread pool to work with.
+                if self.num_validated.load(Ordering::Relaxed) >= self.block_size {
                     break;
                 }
                 thread::yield_now();
