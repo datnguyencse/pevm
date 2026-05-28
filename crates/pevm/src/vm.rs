@@ -5,11 +5,11 @@ use revm::{
     Database,
     context::{
         BlockEnv, ContextSetters, ContextTr, DBErrorMarker, JournalTr, TxEnv,
-        result::{EVMError, InvalidTransaction, ResultAndState},
+        result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
     },
     handler::{EvmTr, FrameResult, Handler},
     primitives::KECCAK_EMPTY,
-    state::{AccountInfo, Bytecode},
+    state::{Account, AccountInfo, Bytecode},
 };
 use smallvec::SmallVec;
 
@@ -38,6 +38,33 @@ pub struct PevmTxExecutionResult {
     pub state: EvmStateTransitions,
 }
 
+fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
+    Receipt {
+        status: result.is_success().into(),
+        cumulative_gas_used: result.tx_gas_used(),
+        logs: result.into_logs(),
+    }
+}
+
+fn state_transitions_from_revm<'a, C: PevmChain>(
+    chain: &'a C,
+    spec_id: C::EvmSpecId,
+    state: impl IntoIterator<Item = (Address, Account)> + 'a,
+) -> impl Iterator<Item = (Address, Option<EvmAccount>)> + 'a {
+    state
+        .into_iter()
+        .filter(|(_, account)| account.is_touched())
+        .map(move |(address, account)| {
+            if account.is_selfdestructed()
+                || account.is_empty() && chain.is_eip_161_enabled(spec_id)
+            {
+                (address, None)
+            } else {
+                (address, Some(EvmAccount::from(account)))
+            }
+        })
+}
+
 impl PevmTxExecutionResult {
     /// Construct a Pevm execution result from a raw Revm result.
     /// Note that [`cumulative_gas_used`] is preset to the gas used in this transaction.
@@ -48,53 +75,22 @@ impl PevmTxExecutionResult {
         ResultAndState { result, state }: ResultAndState<C::EvmHaltReason>,
     ) -> Self {
         Self {
-            receipt: Receipt {
-                status: result.is_success().into(),
-                cumulative_gas_used: result.tx_gas_used(),
-                logs: result.into_logs(),
-            },
-            state: state
-                .into_iter()
-                .filter(|(_, account)| account.is_touched())
-                .map(|(address, account)| {
-                    if account.is_selfdestructed()
-                        || account.is_empty() && chain.is_eip_161_enabled(spec_id)
-                    {
-                        (address, None)
-                    } else {
-                        (address, Some(EvmAccount::from(account)))
-                    }
-                })
-                .collect(),
+            receipt: receipt_from_revm(result),
+            state: state_transitions_from_revm(chain, spec_id, state).collect(),
         }
     }
 
-    // Reuse existing heap allocations (logs Vec, state HashMap) from a prior
-    // incarnation and assign new values from a new Revm execution result.
+    // Reuse the existing state HashMap allocation from a prior incarnation.
     fn assign_from_revm<C: PevmChain>(
         &mut self,
         chain: &C,
         spec_id: C::EvmSpecId,
         ResultAndState { result, state }: ResultAndState<C::EvmHaltReason>,
     ) {
-        self.receipt.status = result.is_success().into();
-        self.receipt.cumulative_gas_used = result.tx_gas_used();
-        self.receipt.logs = result.into_logs();
+        self.receipt = receipt_from_revm(result);
         self.state.clear();
-        self.state.extend(
-            state
-                .into_iter()
-                .filter(|(_, account)| account.is_touched())
-                .map(|(address, account)| {
-                    if account.is_selfdestructed()
-                        || account.is_empty() && chain.is_eip_161_enabled(spec_id)
-                    {
-                        (address, None)
-                    } else {
-                        (address, Some(EvmAccount::from(account)))
-                    }
-                }),
-        );
+        self.state
+            .extend(state_transitions_from_revm(chain, spec_id, state));
     }
 }
 

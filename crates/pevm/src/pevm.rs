@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    fmt::{self, Debug},
+    fmt::Debug,
     num::NonZeroUsize,
     sync::{OnceLock, mpsc},
     thread,
@@ -101,23 +101,52 @@ impl<T> AsyncDropper<T> {
     }
 }
 
-// One slot in the per-block result array. The scheduler guarantees that only the thread
-// executing a given tx index accesses its slot, so interior mutability is safe.
-struct PendingExecutionResult(UnsafeCell<Option<PevmTxExecutionResult>>);
+// Reusable per-block execution result buffer. Each slot is an UnsafeCell so workers
+// can write into it while sharing a &-reference to the container via thread::scope,
+// without the overhead of Mutex per slot.
+//
+// All three unsafe operations are centralised here because they share the same
+// invariant: the scheduler assigns exclusive Executing status to exactly one thread
+// per slot at a time, and the drain phase runs only after all worker threads have
+// joined (providing the necessary happens-before barrier).
+#[derive(Debug, Default)]
+struct PendingExecutionResults(Vec<UnsafeCell<Option<PevmTxExecutionResult>>>);
 
-// SAFETY: The scheduler ensures at most one thread accesses a given slot at a time,
-// and the collection phase runs only after all worker threads have joined.
-unsafe impl Sync for PendingExecutionResult {}
+// SAFETY: See the invariant above - the scheduler prevents concurrent slot access.
+unsafe impl Sync for PendingExecutionResults {}
 
-impl Default for PendingExecutionResult {
-    fn default() -> Self {
-        Self(UnsafeCell::new(None))
+impl PendingExecutionResults {
+    // Grow the buffer so that indices 0..block_size are valid.
+    fn grow_to(&mut self, block_size: usize) {
+        let additional = block_size.saturating_sub(self.0.len());
+        if additional > 0 {
+            self.0.reserve(additional);
+            for _ in 0..additional {
+                self.0.push(UnsafeCell::new(None));
+            }
+        }
     }
-}
 
-impl fmt::Debug for PendingExecutionResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PendingExecutionResult { .. }")
+    // Borrow slot `tx_idx` mutably through the shared container.
+    //
+    // SAFETY: This is sound because the scheduler grants the Executing claim for a
+    // given tx_idx to exactly one thread at a time, so callers from within this crate
+    // never invoke this with the same index concurrently. The type is crate-private
+    // and has a single caller (`try_execute`), so this invariant is enforced by
+    // construction.
+    #[allow(clippy::mut_from_ref)]
+    fn slot_mut(&self, tx_idx: TxIdx) -> &mut Option<PevmTxExecutionResult> {
+        unsafe { &mut *self.0[tx_idx].get() }
+    }
+
+    // Drain the first `block_size` slots after all workers have joined, resetting each
+    // to None so they are ready for the next block.
+    // SAFETY: must only be called after all worker threads have joined; the scheduler
+    // guarantees every slot in 0..block_size was populated by a completed execution.
+    fn drain(&self, block_size: usize) -> impl Iterator<Item = PevmTxExecutionResult> + '_ {
+        self.0[..block_size]
+            .iter()
+            .map(|cell| unsafe { (*cell.get()).take().unwrap_unchecked() })
     }
 }
 
@@ -125,7 +154,7 @@ impl fmt::Debug for PendingExecutionResult {
 #[derive(Debug, Default)]
 /// The main pevm struct that executes blocks.
 pub struct Pevm {
-    execution_results: Vec<PendingExecutionResult>,
+    execution_results: PendingExecutionResults,
     abort_reason: OnceLock<AbortReason>,
     dropper: AsyncDropper<(MvMemory, Scheduler)>,
 }
@@ -206,14 +235,7 @@ impl Pevm {
 
         let mv_memory = chain.build_mv_memory(&block_env, &txs);
 
-        let additional = block_size.saturating_sub(self.execution_results.len());
-        if additional > 0 {
-            self.execution_results.reserve(additional);
-            for _ in 0..additional {
-                self.execution_results
-                    .push(PendingExecutionResult::default());
-            }
-        }
+        self.execution_results.grow_to(block_size);
 
         // TODO: Better thread handling
         thread::scope(|scope| {
@@ -264,11 +286,7 @@ impl Pevm {
 
         let mut fully_evaluated_results = Vec::with_capacity(block_size);
         let mut cumulative_gas_used: u64 = 0;
-        for slot in &mut self.execution_results[..block_size] {
-            // SAFETY: the scheduler guarantees every tx in 0..block_size completes before
-            // we reach this point, so every slot is guaranteed to hold Some(_).
-            let mut result = unsafe { (*slot.0.get()).take().unwrap_unchecked() };
-
+        for mut result in self.execution_results.drain(block_size) {
             cumulative_gas_used =
                 cumulative_gas_used.saturating_add(result.receipt.cumulative_gas_used);
             result.receipt.cumulative_gas_used = cumulative_gas_used;
@@ -403,14 +421,7 @@ impl Pevm {
         scheduler: &Scheduler,
         tx_version: TxVersion,
     ) -> Option<Task> {
-        // SAFETY: scheduler guarantees exclusive access to this index while executing.
-        let out = unsafe {
-            &mut *self
-                .execution_results
-                .get_unchecked(tx_version.tx_idx)
-                .0
-                .get()
-        };
+        let out = self.execution_results.slot_mut(tx_version.tx_idx);
         loop {
             return match vm.execute(&tx_version, out) {
                 Ok(flags) => scheduler.finish_execution(tx_version, flags),
