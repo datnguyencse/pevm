@@ -11,7 +11,10 @@ use alloy_rpc_types_eth::{Block, BlockTransactions};
 use hashbrown::HashMap;
 use revm::{
     DatabaseCommit, ExecuteEvm,
-    context::{BlockEnv, ContextTr, Transaction, result::InvalidTransaction},
+    context::{
+        BlockEnv, ContextTr, Transaction,
+        result::{InvalidTransaction, ResultAndState},
+    },
     database::CacheDB,
     handler::EvmTr,
 };
@@ -24,7 +27,10 @@ use crate::{
     mv_memory::MvMemory,
     scheduler::Scheduler,
     storage::StorageWrapper,
-    vm::{ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError},
+    vm::{
+        ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError, receipt_from_revm,
+        state_transitions_from_revm,
+    },
 };
 
 /// Errors when executing a block with pevm.
@@ -101,14 +107,14 @@ impl<T> AsyncDropper<T> {
     }
 }
 
-// Reusable per-block execution result buffer. Each slot is an UnsafeCell so workers
-// can write into it while sharing a &-reference to the container via thread::scope,
-// without the overhead of Mutex per slot.
+// Reusable per-block execution result buffer. Each slot is an `UnsafeCell` so workers
+// can write into it while sharing a thread-safe reference to the buffer at runtime
+// without synchronisation overheads (like putting each slot behind a mutex).
 //
-// All three unsafe operations are centralised here because they share the same
-// invariant: the scheduler assigns exclusive Executing status to exactly one thread
-// per slot at a time, and the drain phase runs only after all worker threads have
-// joined (providing the necessary happens-before barrier).
+// All unsafe operations are centralised here as they share the same invariant:
+// The scheduler assigns exclusive `Executing` status to exactly one worker thread
+// per slot at a time, and result collection runs only after all worker threads have
+// joined. Other worker tasks like validation don't touch these results at all.
 #[derive(Debug, Default)]
 struct PendingExecutionResults(Vec<UnsafeCell<Option<PevmTxExecutionResult>>>);
 
@@ -116,37 +122,25 @@ struct PendingExecutionResults(Vec<UnsafeCell<Option<PevmTxExecutionResult>>>);
 unsafe impl Sync for PendingExecutionResults {}
 
 impl PendingExecutionResults {
-    // Grow the buffer so that indices 0..block_size are valid.
     fn grow_to(&mut self, block_size: usize) {
-        let additional = block_size.saturating_sub(self.0.len());
-        if additional > 0 {
-            self.0.reserve(additional);
-            for _ in 0..additional {
-                self.0.push(UnsafeCell::new(None));
-            }
+        if block_size > self.0.len() {
+            self.0.resize_with(block_size, || UnsafeCell::new(None));
         }
     }
 
     // Borrow slot `tx_idx` mutably through the shared container.
-    //
-    // SAFETY: This is sound because the scheduler grants the Executing claim for a
-    // given tx_idx to exactly one thread at a time, so callers from within this crate
-    // never invoke this with the same index concurrently. The type is crate-private
-    // and has a single caller (`try_execute`), so this invariant is enforced by
-    // construction.
     #[allow(clippy::mut_from_ref)]
     fn slot_mut(&self, tx_idx: TxIdx) -> &mut Option<PevmTxExecutionResult> {
-        unsafe { &mut *self.0[tx_idx].get() }
+        unsafe { &mut *self.0.get_unchecked(tx_idx).get() }
     }
 
-    // Drain the first `block_size` slots after all workers have joined, resetting each
-    // to None so they are ready for the next block.
-    // SAFETY: must only be called after all worker threads have joined; the scheduler
-    // guarantees every slot in 0..block_size was populated by a completed execution.
-    fn drain(&self, block_size: usize) -> impl Iterator<Item = PevmTxExecutionResult> + '_ {
-        self.0[..block_size]
+    // Take the first `block_size` results after all workers have joined, resetting each
+    // slot to None so they are ready for the next block.
+    fn take(&self, block_size: usize) -> Vec<PevmTxExecutionResult> {
+        unsafe { self.0.get_unchecked(..block_size) }
             .iter()
             .map(|cell| unsafe { (*cell.get()).take().unwrap_unchecked() })
+            .collect()
     }
 }
 
@@ -286,7 +280,7 @@ impl Pevm {
 
         let mut fully_evaluated_results = Vec::with_capacity(block_size);
         let mut cumulative_gas_used: u64 = 0;
-        for mut result in self.execution_results.drain(block_size) {
+        for mut result in self.execution_results.take(block_size) {
             cumulative_gas_used =
                 cumulative_gas_used.saturating_add(result.receipt.cumulative_gas_used);
             result.receipt.cumulative_gas_used = cumulative_gas_used;
@@ -421,9 +415,9 @@ impl Pevm {
         scheduler: &Scheduler,
         tx_version: TxVersion,
     ) -> Option<Task> {
-        let out = self.execution_results.slot_mut(tx_version.tx_idx);
+        let result_slot = self.execution_results.slot_mut(tx_version.tx_idx);
         loop {
-            return match vm.execute(&tx_version, out) {
+            return match vm.execute(&tx_version, result_slot) {
                 Ok(flags) => scheduler.finish_execution(tx_version, flags),
                 Err(VmExecutionError::Retry) => {
                     if self.abort_reason.get().is_none() {
@@ -488,14 +482,16 @@ pub fn execute_revm_sequential<S: Storage + Debug, C: PevmChain>(
     let mut cumulative_gas_used: u64 = 0;
     for tx in txs {
         // TODO: More concrete error type
-        let result_and_state = evm
+        let ResultAndState { result, state } = evm
             .transact(tx)
             .map_err(|err| ExecutionError::Custom(err.to_string()))?;
 
-        evm.ctx().db_mut().commit(result_and_state.state.clone());
+        evm.ctx().db_mut().commit(state.clone());
 
-        let mut execution_result =
-            PevmTxExecutionResult::from_revm(chain, spec_id, result_and_state);
+        let mut execution_result = PevmTxExecutionResult {
+            receipt: receipt_from_revm(result),
+            state: state_transitions_from_revm(chain.is_eip_161_enabled(spec_id), state).collect(),
+        };
 
         cumulative_gas_used =
             cumulative_gas_used.saturating_add(execution_result.receipt.cumulative_gas_used);

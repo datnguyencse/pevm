@@ -9,7 +9,7 @@ use revm::{
     },
     handler::{EvmTr, FrameResult, Handler},
     primitives::KECCAK_EMPTY,
-    state::{Account, AccountInfo, Bytecode},
+    state::{AccountInfo, Bytecode, EvmState},
 };
 use smallvec::SmallVec;
 
@@ -38,7 +38,7 @@ pub struct PevmTxExecutionResult {
     pub state: EvmStateTransitions,
 }
 
-fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
+pub(crate) fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
     Receipt {
         status: result.is_success().into(),
         cumulative_gas_used: result.tx_gas_used(),
@@ -46,52 +46,20 @@ fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
     }
 }
 
-fn state_transitions_from_revm<'a, C: PevmChain>(
-    chain: &'a C,
-    spec_id: C::EvmSpecId,
-    state: impl IntoIterator<Item = (Address, Account)> + 'a,
-) -> impl Iterator<Item = (Address, Option<EvmAccount>)> + 'a {
+pub(crate) fn state_transitions_from_revm(
+    is_eip_161_enabled: bool,
+    state: EvmState,
+) -> impl Iterator<Item = (Address, Option<EvmAccount>)> {
     state
         .into_iter()
         .filter(|(_, account)| account.is_touched())
         .map(move |(address, account)| {
-            if account.is_selfdestructed()
-                || account.is_empty() && chain.is_eip_161_enabled(spec_id)
-            {
+            if account.is_selfdestructed() || account.is_empty() && is_eip_161_enabled {
                 (address, None)
             } else {
                 (address, Some(EvmAccount::from(account)))
             }
         })
-}
-
-impl PevmTxExecutionResult {
-    /// Construct a Pevm execution result from a raw Revm result.
-    /// Note that [`cumulative_gas_used`] is preset to the gas used in this transaction.
-    /// It should be post-processed with the remaining transactions in the block.
-    pub fn from_revm<C: PevmChain>(
-        chain: &C,
-        spec_id: C::EvmSpecId,
-        ResultAndState { result, state }: ResultAndState<C::EvmHaltReason>,
-    ) -> Self {
-        Self {
-            receipt: receipt_from_revm(result),
-            state: state_transitions_from_revm(chain, spec_id, state).collect(),
-        }
-    }
-
-    // Reuse the existing state HashMap allocation from a prior incarnation.
-    fn assign_from_revm<C: PevmChain>(
-        &mut self,
-        chain: &C,
-        spec_id: C::EvmSpecId,
-        ResultAndState { result, state }: ResultAndState<C::EvmHaltReason>,
-    ) {
-        self.receipt = receipt_from_revm(result);
-        self.state.clear();
-        self.state
-            .extend(state_transitions_from_revm(chain, spec_id, state));
-    }
 }
 
 pub(crate) enum VmExecutionError {
@@ -499,13 +467,13 @@ impl<S: Storage> Database for VmDb<'_, S> {
 pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
     // Shared block-level state
     chain: &'a C,
-    spec_id: C::EvmSpecId,
     block_env: &'a BlockEnv,
     txs: &'a [C::EvmTx],
     mv_memory: &'a MvMemory,
     beneficiary_location_hash: MemoryLocationHash,
     // Dedicated EVM for the worker, reset before each transaction exectution.
     evm: C::Evm<VmDb<'a, S>>,
+    is_eip_161_enabled: bool,
 }
 
 impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
@@ -537,7 +505,6 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
         };
         Self {
             chain,
-            spec_id,
             block_env,
             txs,
             mv_memory,
@@ -545,6 +512,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                 block_env.beneficiary,
             )),
             evm: chain.build_evm(spec_id, block_env.clone(), db),
+            is_eip_161_enabled: chain.is_eip_161_enabled(spec_id),
         }
     }
 
@@ -567,7 +535,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
     pub(crate) fn execute(
         &mut self,
         tx_version: &TxVersion,
-        out: &mut Option<PevmTxExecutionResult>,
+        result_slot: &mut Option<PevmTxExecutionResult>,
     ) -> Result<FinishExecFlags, VmExecutionError> {
         // SAFETY: A correct scheduler would guarantee this index to be inbound.
         let full_tx = unsafe { self.txs.get_unchecked(tx_version.tx_idx) };
@@ -658,9 +626,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                             // and return a [None], i.e., [LoadedAsNotExisting]. Without
                             // this check it would write then read a [Some] default
                             // account, which may yield a wrong gas fee, etc.
-                            else if !self.chain.is_eip_161_enabled(self.spec_id)
-                                || !account.is_empty()
-                            {
+                            else if !self.is_eip_161_enabled || !account.is_empty() {
                                 write_set.push((
                                     account_location_hash,
                                     MemoryValue::Basic(AccountBasic {
@@ -702,7 +668,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                 } else {
                     tx.gas_price
                 };
-                if self.chain.is_eip_1559_enabled(self.spec_id) {
+                if self.is_eip_161_enabled {
                     gas_price = gas_price.saturating_sub(self.block_env.basefee as u128);
                 }
                 let rewards = self.chain.get_rewards(
@@ -754,16 +720,20 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                     flags |= FinishExecFlags::WroteNewLocation;
                 }
 
-                match out {
-                    Some(result) => {
-                        result.assign_from_revm(self.chain, self.spec_id, result_and_state)
+                let ResultAndState { result, state } = result_and_state;
+                match result_slot {
+                    Some(slot) => {
+                        slot.receipt = receipt_from_revm(result);
+                        slot.state.clear();
+                        slot.state
+                            .extend(state_transitions_from_revm(self.is_eip_161_enabled, state));
                     }
                     None => {
-                        *out = Some(PevmTxExecutionResult::from_revm(
-                            self.chain,
-                            self.spec_id,
-                            result_and_state,
-                        ))
+                        *result_slot = Some(PevmTxExecutionResult {
+                            receipt: receipt_from_revm(result),
+                            state: state_transitions_from_revm(self.is_eip_161_enabled, state)
+                                .collect(),
+                        });
                     }
                 }
                 Ok(flags)
