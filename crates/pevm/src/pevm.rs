@@ -489,7 +489,7 @@ pub fn execute_revm_sequential<S: Storage + Debug, C: PevmChain>(
 
         let mut execution_result = PevmTxExecutionResult {
             receipt: receipt_from_revm(result),
-            state: state_transitions_from_revm(is_eip_161_enabled, state),
+            state: state_transitions_from_revm(is_eip_161_enabled, state).collect(),
         };
 
         cumulative_gas_used =

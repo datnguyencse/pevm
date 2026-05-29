@@ -53,7 +53,7 @@ pub(crate) fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
 pub(crate) fn state_transitions_from_revm(
     is_eip_161_enabled: bool,
     state: EvmState,
-) -> EvmStateTransitions {
+) -> impl Iterator<Item = (Address, Option<EvmAccount>)> {
     state
         .into_iter()
         .filter(|(_, account)| account.is_touched())
@@ -64,7 +64,6 @@ pub(crate) fn state_transitions_from_revm(
                 (address, Some(EvmAccount::from(account)))
             }
         })
-        .collect()
 }
 
 pub(crate) enum VmExecutionError {
@@ -730,7 +729,10 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                     slot.state.clear();
                     slot.state.extend(state);
                 } else {
-                    *result_slot = Some(PevmTxExecutionResult { receipt, state });
+                    *result_slot = Some(PevmTxExecutionResult {
+                        receipt,
+                        state: state.collect(),
+                    });
                 }
                 Ok(flags)
             }
