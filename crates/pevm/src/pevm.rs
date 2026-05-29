@@ -116,31 +116,28 @@ impl<T> AsyncDropper<T> {
 // per slot at a time, and result collection runs only after all worker threads have
 // joined. Other worker tasks like validation don't touch these results at all.
 #[derive(Debug, Default)]
-struct PendingExecutionResults(Vec<UnsafeCell<Option<PevmTxExecutionResult>>>);
+struct ExecutionResults(Vec<UnsafeCell<Option<PevmTxExecutionResult>>>);
 
-// SAFETY: See the invariant above - the scheduler prevents concurrent slot access.
-unsafe impl Sync for PendingExecutionResults {}
+unsafe impl Sync for ExecutionResults {}
 
-impl PendingExecutionResults {
+impl ExecutionResults {
     fn grow_to(&mut self, block_size: usize) {
         if block_size > self.0.len() {
             self.0.resize_with(block_size, || UnsafeCell::new(None));
         }
     }
 
-    // Borrow slot `tx_idx` mutably through the shared container.
     #[allow(clippy::mut_from_ref)]
     fn slot_mut(&self, tx_idx: TxIdx) -> &mut Option<PevmTxExecutionResult> {
         unsafe { &mut *self.0.get_unchecked(tx_idx).get() }
     }
 
-    // Take the first `block_size` results after all workers have joined, resetting each
-    // slot to None so they are ready for the next block.
-    fn take(&self, block_size: usize) -> Vec<PevmTxExecutionResult> {
-        unsafe { self.0.get_unchecked(..block_size) }
-            .iter()
-            .map(|cell| unsafe { (*cell.get()).take().unwrap_unchecked() })
-            .collect()
+    fn take_slot(&self, tx_idx: TxIdx) -> PevmTxExecutionResult {
+        unsafe {
+            (*self.0.get_unchecked(tx_idx).get())
+                .take()
+                .unwrap_unchecked()
+        }
     }
 }
 
@@ -148,7 +145,7 @@ impl PendingExecutionResults {
 #[derive(Debug, Default)]
 /// The main pevm struct that executes blocks.
 pub struct Pevm {
-    execution_results: PendingExecutionResults,
+    execution_results: ExecutionResults,
     abort_reason: OnceLock<AbortReason>,
     dropper: AsyncDropper<(MvMemory, Scheduler)>,
 }
@@ -280,11 +277,12 @@ impl Pevm {
 
         let mut fully_evaluated_results = Vec::with_capacity(block_size);
         let mut cumulative_gas_used: u64 = 0;
-        for mut result in self.execution_results.take(block_size) {
+        for tx_idx in 0..block_size {
+            let mut execution_result = self.execution_results.take_slot(tx_idx);
             cumulative_gas_used =
-                cumulative_gas_used.saturating_add(result.receipt.cumulative_gas_used);
-            result.receipt.cumulative_gas_used = cumulative_gas_used;
-            fully_evaluated_results.push(result);
+                cumulative_gas_used.saturating_add(execution_result.receipt.cumulative_gas_used);
+            execution_result.receipt.cumulative_gas_used = cumulative_gas_used;
+            fully_evaluated_results.push(execution_result);
         }
 
         // We fully evaluate (the balance and nonce of) the beneficiary account
@@ -476,6 +474,7 @@ pub fn execute_revm_sequential<S: Storage + Debug, C: PevmChain>(
     txs: Vec<C::EvmTx>,
 ) -> PevmResult<C> {
     let db = CacheDB::new(StorageWrapper(storage));
+    let is_eip_161_enabled = chain.is_eip_161_enabled(spec_id);
     let mut evm = chain.build_evm(spec_id, block_env, db);
 
     let mut results: Vec<PevmTxExecutionResult> = Vec::with_capacity(txs.len());
@@ -490,7 +489,7 @@ pub fn execute_revm_sequential<S: Storage + Debug, C: PevmChain>(
 
         let mut execution_result = PevmTxExecutionResult {
             receipt: receipt_from_revm(result),
-            state: state_transitions_from_revm(chain.is_eip_161_enabled(spec_id), state).collect(),
+            state: state_transitions_from_revm(is_eip_161_enabled, state),
         };
 
         cumulative_gas_used =

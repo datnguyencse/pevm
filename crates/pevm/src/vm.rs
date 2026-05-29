@@ -5,7 +5,7 @@ use revm::{
     Database,
     context::{
         BlockEnv, ContextSetters, ContextTr, DBErrorMarker, JournalTr, TxEnv,
-        result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
+        result::{EVMError, ExecutionResult, InvalidTransaction},
     },
     handler::{EvmTr, FrameResult, Handler},
     primitives::KECCAK_EMPTY,
@@ -38,6 +38,9 @@ pub struct PevmTxExecutionResult {
     pub state: EvmStateTransitions,
 }
 
+/// Convert Revm's execution result into a standard receipt.
+/// Note that the cumulative gas used in the receipt is preset to the gas used in this transaction.
+/// It should be post-processed with the remaining transactions in the block.
 pub(crate) fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
     Receipt {
         status: result.is_success().into(),
@@ -46,10 +49,11 @@ pub(crate) fn receipt_from_revm<H>(result: ExecutionResult<H>) -> Receipt {
     }
 }
 
+/// Convert Revm's state transitions into PEVM's state transitions.
 pub(crate) fn state_transitions_from_revm(
     is_eip_161_enabled: bool,
     state: EvmState,
-) -> impl Iterator<Item = (Address, Option<EvmAccount>)> {
+) -> EvmStateTransitions {
     state
         .into_iter()
         .filter(|(_, account)| account.is_touched())
@@ -60,6 +64,7 @@ pub(crate) fn state_transitions_from_revm(
                 (address, Some(EvmAccount::from(account)))
             }
         })
+        .collect()
 }
 
 pub(crate) enum VmExecutionError {
@@ -467,13 +472,13 @@ impl<S: Storage> Database for VmDb<'_, S> {
 pub(crate) struct Vm<'a, S: Storage, C: PevmChain> {
     // Shared block-level state
     chain: &'a C,
+    is_eip_161_enabled: bool,
     block_env: &'a BlockEnv,
     txs: &'a [C::EvmTx],
     mv_memory: &'a MvMemory,
     beneficiary_location_hash: MemoryLocationHash,
     // Dedicated EVM for the worker, reset before each transaction exectution.
     evm: C::Evm<VmDb<'a, S>>,
-    is_eip_161_enabled: bool,
 }
 
 impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
@@ -505,6 +510,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
         };
         Self {
             chain,
+            is_eip_161_enabled: chain.is_eip_161_enabled(spec_id),
             block_env,
             txs,
             mv_memory,
@@ -512,7 +518,6 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                 block_env.beneficiary,
             )),
             evm: chain.build_evm(spec_id, block_env.clone(), db),
-            is_eip_161_enabled: chain.is_eip_161_enabled(spec_id),
         }
     }
 
@@ -572,11 +577,9 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                 let mut write_set = WriteSet::with_capacity(6);
 
                 let ctx = self.evm.ctx();
+                let state = ctx.journal_mut().finalize();
 
-                let result_and_state =
-                    ResultAndState::new(exec_result, ctx.journal_mut().finalize());
-
-                for (address, account) in &result_and_state.state {
+                for (address, account) in &state {
                     if account.is_selfdestructed() {
                         // TODO: Also write [SelfDestructed] to the basic location?
                         // For now we are betting on [code_hash] triggering the sequential
@@ -673,7 +676,7 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                 }
                 let rewards = self.chain.get_rewards(
                     self.beneficiary_location_hash,
-                    U256::from(result_and_state.result.tx_gas_used()),
+                    U256::from(exec_result.tx_gas_used()),
                     U256::from(gas_price),
                     self.block_env.basefee,
                     full_tx,
@@ -720,21 +723,14 @@ impl<'a, S: Storage, C: PevmChain> Vm<'a, S, C> {
                     flags |= FinishExecFlags::WroteNewLocation;
                 }
 
-                let ResultAndState { result, state } = result_and_state;
-                match result_slot {
-                    Some(slot) => {
-                        slot.receipt = receipt_from_revm(result);
-                        slot.state.clear();
-                        slot.state
-                            .extend(state_transitions_from_revm(self.is_eip_161_enabled, state));
-                    }
-                    None => {
-                        *result_slot = Some(PevmTxExecutionResult {
-                            receipt: receipt_from_revm(result),
-                            state: state_transitions_from_revm(self.is_eip_161_enabled, state)
-                                .collect(),
-                        });
-                    }
+                let receipt = receipt_from_revm(exec_result);
+                let state = state_transitions_from_revm(self.is_eip_161_enabled, state);
+                if let Some(slot) = result_slot {
+                    slot.receipt = receipt;
+                    slot.state.clear();
+                    slot.state.extend(state);
+                } else {
+                    *result_slot = Some(PevmTxExecutionResult { receipt, state });
                 }
                 Ok(flags)
             }
